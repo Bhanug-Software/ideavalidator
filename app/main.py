@@ -1,14 +1,18 @@
 from app.agent.validator_agent import ValidatorAgent
 from app.utils.logger import logger
+from app.utils.user_guidance import user_guidance
 
 def main():
-    """Test the validator agent"""
+    """Validator agent - interactive mode"""
+
+    # Show user guidance
+    user_guidance.show_format()
+
+    # Get project idea from user
+    project_idea = input("\n> ").strip()
 
     # Create agent
     agent = ValidatorAgent()
-
-    # Test with a project idea
-    project_idea = "I want to build a Netflix clone"
 
     # Step 1: Starting validation
     print("\n" + "=" * 80)

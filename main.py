@@ -7,7 +7,7 @@ def main():
     agent = ValidatorAgent()
 
     # Test with a project idea
-    project_idea = "i want to take a franchise of Maggianos little Italy in overland park,kansas, 66223"
+    project_idea = "i want to build a AI-Powered Study Companion for Medical Students"
 
     print("=" * 60)
     print(f"Validating: {project_idea}")
@@ -16,11 +16,7 @@ def main():
     # Validate the idea
     result = agent.validate_idea(project_idea)
 
-    # Print results
-    # Print raw response first (for debugging)
-    
-
-    #Print parsed results
+    # Print parsed results
     print(f"\n\nPARSED RESULTS:")
     print("=" * 60)
     print(f"Score: {result['score']}/100")
@@ -28,6 +24,7 @@ def main():
     print(f"Reasoning: {result['reasoning']}")
     print("=" * 60)
     print(f"Recommendation: {result['recommendation']}")
+    
 
 if __name__ == "__main__":
     main()
