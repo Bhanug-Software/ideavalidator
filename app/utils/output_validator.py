@@ -1,12 +1,11 @@
 # Output Validator - Pydantic Model for Claude's Response
-# This file will contain the ProjectAnalysis Pydantic model
-# to validate Claude's output structure
+# Comprehensive project analysis model for any domain
 
 from pydantic import BaseModel, Field, validator
 from loguru import logger
 
 class ProjectAnalysis(BaseModel):
-    """Structured output from ValidatorAgent - with validation rules"""
+    """Complete structured output from ValidatorAgent"""
 
     score: int = Field(
         ge=0,
@@ -14,13 +13,45 @@ class ProjectAnalysis(BaseModel):
         description="Viability score from 0-100"
     )
 
-    reasoning: str = Field(
-        min_length=20,
-        description="Why this score? (2-3 sentences)"
-    )
-
     recommendation: str = Field(
         description="Build it / Don't build it / Consider changes"
+    )
+
+    market_opportunity: str = Field(
+        description="Market size, demand, and competition analysis"
+    )
+
+    feasibility: str = Field(
+        description="Technical complexity, required skills, timeline, budget"
+    )
+
+    resources_required: str = Field(
+        description="Team composition, skills, capital, and timeline needed"
+    )
+
+    dos: str = Field(
+        description="Critical DO's during development (what to focus on)"
+    )
+
+    donts: str = Field(
+        description="Critical DON'Ts during development (what to avoid)"
+    )
+
+    key_risks: str = Field(
+        description="Key risks and mitigation strategies"
+    )
+
+    timeline: str = Field(
+        description="Realistic timeline and phases"
+    )
+
+    next_step: str = Field(
+        description="Immediate next action to take"
+    )
+
+    changes_required: str = Field(
+        description="If recommendation is 'Consider changes': what specific changes to make",
+        default=""
     )
 
     @validator('recommendation')

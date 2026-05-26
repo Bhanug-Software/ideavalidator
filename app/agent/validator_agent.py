@@ -1,3 +1,4 @@
+import re
 from app.utils.config import client, MODEL, MAX_TOKENS
 from app.utils.logger import logger
 from app.utils.input_validator import input_validator
@@ -39,39 +40,36 @@ class ValidatorAgent:
 
         logger.info("✅ Input validated successfully, sending to Claude...")
 
-        prompt = f"""You are an expert project validator with 20 years of experience evaluating startup ideas.
+        prompt = f"""You are someone who helps people decide if their project ideas are good.
 
-Analyze this project idea and provide a viability score (0-100), your reasoning, and a recommendation.
-Use natural language. Don't use AI buzzwords or exaggerated language.
+I will give you a project idea. Please analyze it and give honest feedback.
+Use simple words. No technical jargon. Speak like a friend helping a friend.
 
-EXAMPLES OF GOOD OUTPUTS:
-- Idea: Netflix clone
-SCORE: 22
-REASONING: Market saturated with Netflix, Disney+, Hulu, Amazon Prime. Content licensing costs billions per year. No competitive advantage without massive capital and exclusive content deals.
-RECOMMENDATION: Don't build it
-
-- Idea: AI email assistant for busy executives
-SCORE: 68
-REASONING: Growing market demand, clear ROI for enterprise. However, established competitors (Gmail, Outlook) have huge advantages. Needs unique differentiation.
-RECOMMENDATION: Build it - with a specific niche angle
-
-- Idea: Local flower delivery service
-SCORE: 45
-REASONING: Niche market with loyal customers but high logistics costs, limited scalability, and strong local competition. Difficult to expand beyond one city.
-RECOMMENDATION: Consider changes - focus on subscription model or corporate contracts
-
-- Idea: explain about RAG?
-SCORE: 
-REASONING: its not a project idea. Its a general AI topic about Retrieval Augment Generation
-RECOMMENDATION: Consider sending only project ideas
-
-Now analyze this project idea:
 Project idea: {project_idea}
 
-Respond in this exact format (ONLY the specified values, nothing extra):
-SCORE: [number 0-100]
-REASONING: [2-3 sentences]
-RECOMMENDATION: [Build it / Don't build it / Consider changes]"""
+Please respond in this format (ONLY the values, nothing extra):
+
+SCORE: [number between 0 and 100]
+
+RECOMMENDATION: [Build it / Don't build it / Consider changes]
+
+MARKET_OPPORTUNITY: [Simple explanation: Is there real demand? Who needs it? How many people?]
+
+FEASIBILITY: [Simple explanation: Is it hard to build? How long will it take? How much money needed?]
+
+RESOURCES_REQUIRED: [Simple explanation: What kind of people do you need? How much will it cost?]
+
+DOS: [5-6 things that are important to do, format as bullet points with • prefix]
+
+DONTS: [5-6 things to avoid doing, format as bullet points with • prefix]
+
+KEY_RISKS: [4-5 problems that could happen and how to fix them, format as "Problem: Solution"]
+
+TIMELINE: [How long will it take? Break it into simple phases with time]
+
+NEXT_STEP: [One thing to do this week to check if your idea is good]
+
+CHANGES_REQUIRED: [If recommendation is 'Consider changes': what to change to make it better. If other: write 'N/A']"""
 
         # Send message to Claude
         logger.info("→ Sending prompt to Claude API...")
@@ -96,54 +94,153 @@ RECOMMENDATION: [Build it / Don't build it / Consider changes]"""
     #parsing the response text with the helper method
 
     def _parse_response(self, response_text : str) -> dict :
-        '''parse claude response into structred format'''
-
-        lines = response_text.strip().split("\n")
+        '''parse claude response into structured format using regex for robustness'''
 
         score = 0
-        reasoning = ""
         recommendation = ""
+        market_opportunity = ""
+        feasibility = ""
+        resources_required = ""
+        dos = ""
+        donts = ""
+        key_risks = ""
+        timeline = ""
+        next_step = ""
+        changes_required = ""
 
-        for line in lines:
-            if line.startswith("SCORE:"):
-                try:
-                    score = int(line.replace("SCORE:", "").strip())
-                except:
-                    score = 0
-            elif line.startswith("REASONING:"):
-                reasoning = line.replace("REASONING:", "").strip()
-            elif line.startswith("RECOMMENDATION:"):
-                rec_text = line.replace("RECOMMENDATION:", "").strip()
-                # Extract only the base recommendation, ignoring extra details
-                if "Build it" in rec_text:
-                    recommendation = "Build it"
-                elif "Don't build it" in rec_text:
-                    recommendation = "Don't build it"
-                elif "Consider changes" in rec_text:
-                    recommendation = "Consider changes"
-                else:
-                    recommendation = rec_text
+        # Extract SCORE
+        score_match = re.search(r'SCORE:\s*(\d+)', response_text)
+        if score_match:
+            try:
+                score = int(score_match.group(1))
+            except ValueError:
+                logger.warning("⚠️ Could not parse score, defaulting to 0")
+                score = 0
+        else:
+            logger.warning("⚠️ SCORE field not found in response")
+
+        # Extract RECOMMENDATION
+        rec_match = re.search(r'RECOMMENDATION:\s*(.+?)(?=MARKET_OPPORTUNITY:|$)', response_text, re.DOTALL)
+        if rec_match:
+            rec_text = rec_match.group(1).strip()
+            if "Build it" in rec_text:
+                recommendation = "Build it"
+            elif "Don't build it" in rec_text:
+                recommendation = "Don't build it"
+            elif "Consider changes" in rec_text:
+                recommendation = "Consider changes"
+            else:
+                recommendation = rec_text
+        else:
+            logger.warning("⚠️ RECOMMENDATION field not found in response")
+
+        # Extract MARKET_OPPORTUNITY
+        market_match = re.search(r'MARKET_OPPORTUNITY:\s*(.+?)(?=FEASIBILITY:|$)', response_text, re.DOTALL)
+        if market_match:
+            market_opportunity = market_match.group(1).strip()
+        else:
+            logger.warning("⚠️ MARKET_OPPORTUNITY field not found in response")
+
+        # Extract FEASIBILITY
+        feasibility_match = re.search(r'FEASIBILITY:\s*(.+?)(?=RESOURCES_REQUIRED:|$)', response_text, re.DOTALL)
+        if feasibility_match:
+            feasibility = feasibility_match.group(1).strip()
+        else:
+            logger.warning("⚠️ FEASIBILITY field not found in response")
+
+        # Extract RESOURCES_REQUIRED
+        resources_match = re.search(r'RESOURCES_REQUIRED:\s*(.+?)(?=DOS:|$)', response_text, re.DOTALL)
+        if resources_match:
+            resources_required = resources_match.group(1).strip()
+        else:
+            logger.warning("⚠️ RESOURCES_REQUIRED field not found in response")
+
+        # Extract DOS
+        dos_match = re.search(r'DOS:\s*(.+?)(?=DONTS:|$)', response_text, re.DOTALL)
+        if dos_match:
+            dos = dos_match.group(1).strip()
+        else:
+            logger.warning("⚠️ DOS field not found in response")
+
+        # Extract DONTS
+        donts_match = re.search(r'DONTS:\s*(.+?)(?=KEY_RISKS:|$)', response_text, re.DOTALL)
+        if donts_match:
+            donts = donts_match.group(1).strip()
+        else:
+            logger.warning("⚠️ DONTS field not found in response")
+
+        # Extract KEY_RISKS
+        risks_match = re.search(r'KEY_RISKS:\s*(.+?)(?=TIMELINE:|$)', response_text, re.DOTALL)
+        if risks_match:
+            key_risks = risks_match.group(1).strip()
+        else:
+            logger.warning("⚠️ KEY_RISKS field not found in response")
+
+        # Extract TIMELINE
+        timeline_match = re.search(r'TIMELINE:\s*(.+?)(?=NEXT_STEP:|$)', response_text, re.DOTALL)
+        if timeline_match:
+            timeline = timeline_match.group(1).strip()
+        else:
+            logger.warning("⚠️ TIMELINE field not found in response")
+
+        # Extract NEXT_STEP
+        next_step_match = re.search(r'NEXT_STEP:\s*(.+?)(?=CHANGES_REQUIRED:|$)', response_text, re.DOTALL)
+        if next_step_match:
+            next_step = next_step_match.group(1).strip()
+        else:
+            logger.warning("⚠️ NEXT_STEP field not found in response")
+
+        # Extract CHANGES_REQUIRED
+        changes_match = re.search(r'CHANGES_REQUIRED:\s*(.+?)$', response_text, re.MULTILINE | re.DOTALL)
+        if changes_match:
+            changes_required = changes_match.group(1).strip()
+        else:
+            logger.warning("⚠️ CHANGES_REQUIRED field not found in response")
 
         # Validate parsed data using Pydantic model
         try:
             validated = ProjectAnalysis(
                 score=score,
-                reasoning=reasoning,
-                recommendation=recommendation
+                recommendation=recommendation,
+                market_opportunity=market_opportunity,
+                feasibility=feasibility,
+                resources_required=resources_required,
+                dos=dos,
+                donts=donts,
+                key_risks=key_risks,
+                timeline=timeline,
+                next_step=next_step,
+                changes_required=changes_required
             )
             logger.info("✅ Output validation passed - all fields are correct")
             return {
                 "score": validated.score,
-                "reasoning": validated.reasoning,
                 "recommendation": validated.recommendation,
+                "market_opportunity": validated.market_opportunity,
+                "feasibility": validated.feasibility,
+                "resources_required": validated.resources_required,
+                "dos": validated.dos,
+                "donts": validated.donts,
+                "key_risks": validated.key_risks,
+                "timeline": validated.timeline,
+                "next_step": validated.next_step,
+                "changes_required": validated.changes_required,
                 "raw_response": response_text
             }
         except ValidationError as e:
             logger.error(f"❌ Output validation failed: {e}")
             return {
                 "score": 0,
-                "reasoning": f"Validation error: {str(e)}",
                 "recommendation": "Please try again",
+                "market_opportunity": "",
+                "feasibility": "",
+                "resources_required": "",
+                "dos": "",
+                "donts": "",
+                "key_risks": "",
+                "timeline": "",
+                "next_step": f"Validation error: {str(e)}",
+                "changes_required": "",
                 "raw_response": response_text,
                 "validation_failed": True
             }
