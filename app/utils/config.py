@@ -8,4 +8,4 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 client = Anthropic(api_key = ANTHROPIC_API_KEY)
 MODEL = "claude-sonnet-4-6"
-MAX_TOKENS = 1024
+MAX_TOKENS = 4096

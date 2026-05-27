@@ -1,5 +1,9 @@
 from loguru import logger
 from app.utils.config import client
+import os
+from langsmith import traceable
+
+os.environ.setdefault("LANGSMITH_TRACING", "true")
 
 class InputValidator:
     """Validate user input before sending to Claude"""
@@ -89,6 +93,7 @@ Answer only YES or NO:"""
             logger.error(f"Semantic check failed: {e}")
             return False, "Error checking input"
 
+    @traceable(name="validate_complete", tags=["validation", "input"])
     def validate_complete(self, project_idea: str) -> tuple[bool, str]:
         """Run all validation checks in smart order"""
 
