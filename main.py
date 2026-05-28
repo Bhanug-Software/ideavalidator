@@ -42,53 +42,37 @@ def main():
     print(f"YOUR PROJECT ANALYSIS")
     print(f"{'='*70}\n")
 
-    print(f"Score: {result['score']} out of 100")
-    print(f"\n{'='*70}")
-
-    print(f"\nMarket Opportunity (Is there real demand?):")
-    print(f"{result['market_opportunity']}\n")
+    print(f"\n💡 Idea Summary:")
+    print(f"{result['idea_summary']}\n")
 
     print(f"{'='*70}")
-    print(f"\nHow Hard Is It To Build?")
-    print(f"{result['feasibility']}\n")
+    print(f"\n🎯 Problem Statement:")
+    print(f"{result['problem_statement']}\n")
 
     print(f"{'='*70}")
-    print(f"\nWhat You Will Need:")
-    print(f"{result['resources_required']}\n")
+    print(f"\n👥 Target Audience:")
+    print(f"{result['target_audience']}\n")
 
     print(f"{'='*70}")
-    print(f"\nThings To Do:")
-    print(f"{result['dos']}\n")
+    print(f"\n📊 Market Validation:")
+    print(f"{result['market_validation']}\n")
 
     print(f"{'='*70}")
-    print(f"\nThings To Avoid:")
-    print(f"{result['donts']}\n")
+    print(f"\n🔍 Competitor Analysis:")
+    print(f"{result['competitor_analysis']}\n")
 
     print(f"{'='*70}")
-    print(f"\nProblems That Could Happen:")
-    print(f"{result['key_risks']}\n")
+    print(f"\n🚀 MVP Recommendation:")
+    print(f"{result['mvp_recommendation']}\n")
 
     print(f"{'='*70}")
-    print(f"\nHow Long Will It Take?")
-    print(f"{result['timeline']}\n")
+    print(f"\n⚠️  Risk Analysis:")
+    print(f"{result['risk_analysis']}\n")
 
     print(f"{'='*70}")
-    print(f"\nWhat To Do First:")
-    print(f"{result['next_step']}\n")
+    print(f"\n✅ Final Recommendation: {result['final_recommendation']}")
 
-    print(f"{'='*70}")
-    print(f"\nMy Recommendation: {result['recommendation']}")
-
-    # Show changes required if recommendation is "Consider changes"
-    if result['recommendation'] == "Consider changes":
-        print(f"\n{'='*70}")
-        print(f"\nHow To Fix It:")
-        if result['changes_required'] and result['changes_required'] != "N/A":
-            print(f"{result['changes_required']}\n")
-        else:
-            print(f"See the 'Things To Do' and 'Things To Avoid' sections above for guidance.\n")
-
-    print(f"{'='*70}\n")
+    print(f"\n{'='*70}\n")
 
     # Ask if user wants to send analysis to email
     send_email = input("Do you want to send this analysis to your email? (yes/no): ").strip().lower()

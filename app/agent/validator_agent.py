@@ -1,6 +1,8 @@
 import re
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from app.utils.config import client, MODEL, MAX_TOKENS
 from app.utils.logger import logger
 from app.utils.input_validator import input_validator
@@ -10,8 +12,12 @@ from pydantic import ValidationError
 from app.tools import custom_tools
 from app.tools.tools_schema import TOOLS_SCHEMA
 from langsmith import traceable
+from langsmith.client import Client as LangSmithClient
 
 os.environ.setdefault("LANGSMITH_TRACING", "true")
+
+# Initialize LangSmith client for manual tracing
+langsmith_client = LangSmithClient()
 
 class ValidatorAgent:
     #AI Agent that validates the project ideas
@@ -21,6 +27,7 @@ class ValidatorAgent:
         self.model = MODEL
         self.max_tokens = MAX_TOKENS
         self.tools = TOOLS_SCHEMA
+        self._tool_lock = threading.Lock()  # for thread-safe operations
 
     @traceable(name="execute_tool", tags=["tools", "execution"])
     def _execute_tool(self, tool_name, tool_input):
@@ -32,6 +39,10 @@ class ValidatorAgent:
                 tool_input["email_address"],
                 tool_input["subject"],
                 tool_input["body"]
+            )
+        elif tool_name == "tavily_search":
+            return custom_tools.tavily_search(
+                tool_input["query"]
             )
         else:
             return f"Unknown tool: {tool_name}"
@@ -64,42 +75,37 @@ class ValidatorAgent:
 
         logger.info("✅ Input validated successfully, sending to Claude...")
 
-        prompt = f"""You're a mentor helping someone figure out if their project idea is worth building.
+        prompt = f"""You are an expert startup advisor validating a project idea.
 
-Here's their idea: {project_idea}
+Here's the idea: {project_idea}
 
-Give them honest, friendly feedback. Write like you're texting a friend - casual, natural, real.
-- No corporate speak
-- No fancy terminology
-- Keep it short and punchy
-- Be encouraging but honest
-- IMPORTANT: Use regular dashes (-) or commas, NOT em dashes (—)
+BEFORE writing your analysis, use tavily_search exactly 2 times:
+1. First search: find real competitors for this idea
+2. Second search: find current market size and demand for this idea
+Only use send_email_to_user if the user explicitly asks to send results to their email.
 
-You have access to tools for supply chain data. Use them if the idea involves suppliers, logistics, compliance, or market research.
+Write in a casual, friendly tone - like advising a friend.
+- Use regular dashes (-), NOT em dashes (—)
+- Do NOT use markdown formatting (no **, no *, no ---, no ###)
+- Plain text only
 
-Format your response EXACTLY like this (keep each section, don't skip):
+Format your response EXACTLY like this (keep every section, don't skip any):
 
-SCORE: [0-100 number]
+IDEA_SUMMARY: [2-3 sentences describing what this idea is]
 
-RECOMMENDATION: [Build it / Don't build it / Consider changes]
+PROBLEM_STATEMENT: [What specific problem does this solve? Who feels this pain?]
 
-MARKET_OPPORTUNITY: [Casual explanation - real demand? Who wants it? How many people?]
+TARGET_AUDIENCE: [Who exactly is this for? Age, role, situation - be specific]
 
-FEASIBILITY: [Is it doable? How long? Cost estimate? Be real about it.]
+MARKET_VALIDATION: [Real market size, demand signals, growth trends based on your search]
 
-RESOURCES_REQUIRED: [What team do you need? Budget reality?]
+COMPETITOR_ANALYSIS: [List 3-5 real competitors found, how this idea is different]
 
-DOS: [5-6 bullet points with • - things to actually do]
+MVP_RECOMMENDATION: [What is the simplest version to build first? What features are must-haves vs nice-to-haves?]
 
-DONTS: [5-6 bullet points with • - real traps to avoid]
+RISK_ANALYSIS: [4-5 real risks with a short mitigation for each]
 
-KEY_RISKS: [4-5 actual problems that could happen, with quick fixes]
-
-TIMELINE: [Break down the months - be realistic]
-
-NEXT_STEP: [One concrete thing they should do this week]
-
-CHANGES_REQUIRED: [If you said 'Consider changes' above, list 3-5 specific tweaks. Otherwise write 'N/A']"""
+FINAL_RECOMMENDATION: [Build it / Don't build it / Consider changes]"""
 
         # Send message to Claude with tools
         logger.info("→ Sending prompt to Claude API with tools...")
@@ -138,18 +144,21 @@ CHANGES_REQUIRED: [If you said 'Consider changes' above, list 3-5 specific tweak
             # Add Claude's response to messages
             messages.append({"role": "assistant", "content": message.content})
 
-            # Execute each tool and collect results
-            tool_results = []
-            for tool_call in tool_calls:
+            # Execute each tool in parallel and collect results
+            def run_tool(tool_call):
                 logger.info(f"Executing: {tool_call.name}")
-                tool_result = self._execute_tool(tool_call.name, tool_call.input)
+                result = self._execute_tool(tool_call.name, tool_call.input)
                 logger.info(f"✅ Tool result received")
-
-                tool_results.append({
+                return {
                     "type": "tool_result",
                     "tool_use_id": tool_call.id,
-                    "content": tool_result
-                })
+                    "content": result
+                }
+
+            tool_results = []
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(run_tool, tool_call) for tool_call in tool_calls]
+                tool_results = [future.result() for future in futures]
 
             # Send tool results back to Claude
             messages.append({"role": "user", "content": tool_results})
@@ -170,166 +179,94 @@ CHANGES_REQUIRED: [If you said 'Consider changes' above, list 3-5 specific tweak
     #parsing the response text with the helper method
 
     def _clean_text(self, text: str) -> str:
-        """Remove em dashes and other formatting issues"""
-        # Replace em dashes with regular dashes or commas
+        """Remove markdown and formatting artifacts from Claude's response"""
         text = text.replace("—", " - ")
         text = text.replace("–", "-")
-        return text
+        # Remove markdown bold/italic markers
+        text = text.replace("**", "")
+        text = text.replace("*", "")
+        # Remove horizontal rules
+        text = re.sub(r'\n---+\n', '\n', text)
+        text = re.sub(r'\n===+\n', '\n', text)
+        # Remove leading/trailing whitespace per line
+        lines = [line.rstrip() for line in text.split('\n')]
+        # Remove repeated blank lines
+        cleaned = []
+        prev_blank = False
+        for line in lines:
+            is_blank = line.strip() == ""
+            if is_blank and prev_blank:
+                continue
+            cleaned.append(line)
+            prev_blank = is_blank
+        return '\n'.join(cleaned).strip()
 
     @traceable(name="parse_response", tags=["parsing", "claude"])
-    def _parse_response(self, response_text : str) -> dict :
-        '''parse claude response into structured format using regex for robustness'''
+    def _parse_response(self, response_text: str) -> dict:
+        '''parse claude response into structured format using regex'''
 
-        score = 0
-        recommendation = ""
-        market_opportunity = ""
-        feasibility = ""
-        resources_required = ""
-        dos = ""
-        donts = ""
-        key_risks = ""
-        timeline = ""
-        next_step = ""
-        changes_required = ""
+        def extract(label, next_label):
+            pattern = rf'{label}:\s*(.+?)(?={next_label}:|$)'
+            match = re.search(pattern, response_text, re.DOTALL)
+            if match:
+                return match.group(1).strip()
+            logger.warning(f"⚠️ {label} field not found in response")
+            return ""
 
-        # Extract SCORE
-        score_match = re.search(r'SCORE:\s*(\d+)', response_text)
-        if score_match:
-            try:
-                score = int(score_match.group(1))
-            except ValueError:
-                logger.warning("⚠️ Could not parse score, defaulting to 0")
-                score = 0
+        idea_summary        = extract("IDEA_SUMMARY",        "PROBLEM_STATEMENT")
+        problem_statement   = extract("PROBLEM_STATEMENT",   "TARGET_AUDIENCE")
+        target_audience     = extract("TARGET_AUDIENCE",     "MARKET_VALIDATION")
+        market_validation   = extract("MARKET_VALIDATION",   "COMPETITOR_ANALYSIS")
+        competitor_analysis = extract("COMPETITOR_ANALYSIS", "MVP_RECOMMENDATION")
+        mvp_recommendation  = extract("MVP_RECOMMENDATION",  "RISK_ANALYSIS")
+        risk_analysis       = extract("RISK_ANALYSIS",       "FINAL_RECOMMENDATION")
+
+        # Extract FINAL_RECOMMENDATION
+        rec_match = re.search(r'FINAL_RECOMMENDATION:\s*(.+?)$', response_text, re.DOTALL)
+        rec_text = rec_match.group(1).strip() if rec_match else ""
+        if "Build it" in rec_text:
+            final_recommendation = "Build it"
+        elif "Don't build it" in rec_text:
+            final_recommendation = "Don't build it"
+        elif "Consider changes" in rec_text:
+            final_recommendation = "Consider changes"
         else:
-            logger.warning("⚠️ SCORE field not found in response")
+            final_recommendation = rec_text
 
-        # Extract RECOMMENDATION
-        rec_match = re.search(r'RECOMMENDATION:\s*(.+?)(?=MARKET_OPPORTUNITY:|$)', response_text, re.DOTALL)
-        if rec_match:
-            rec_text = rec_match.group(1).strip()
-            if "Build it" in rec_text:
-                recommendation = "Build it"
-            elif "Don't build it" in rec_text:
-                recommendation = "Don't build it"
-            elif "Consider changes" in rec_text:
-                recommendation = "Consider changes"
-            else:
-                recommendation = rec_text
-        else:
-            logger.warning("⚠️ RECOMMENDATION field not found in response")
-
-        # Extract MARKET_OPPORTUNITY
-        market_match = re.search(r'MARKET_OPPORTUNITY:\s*(.+?)(?=FEASIBILITY:|$)', response_text, re.DOTALL)
-        if market_match:
-            market_opportunity = market_match.group(1).strip()
-        else:
-            logger.warning("⚠️ MARKET_OPPORTUNITY field not found in response")
-
-        # Extract FEASIBILITY
-        feasibility_match = re.search(r'FEASIBILITY:\s*(.+?)(?=RESOURCES_REQUIRED:|$)', response_text, re.DOTALL)
-        if feasibility_match:
-            feasibility = feasibility_match.group(1).strip()
-        else:
-            logger.warning("⚠️ FEASIBILITY field not found in response")
-
-        # Extract RESOURCES_REQUIRED
-        resources_match = re.search(r'RESOURCES_REQUIRED:\s*(.+?)(?=DOS:|$)', response_text, re.DOTALL)
-        if resources_match:
-            resources_required = resources_match.group(1).strip()
-        else:
-            logger.warning("⚠️ RESOURCES_REQUIRED field not found in response")
-
-        # Extract DOS
-        dos_match = re.search(r'DOS:\s*(.+?)(?=DONTS:|$)', response_text, re.DOTALL)
-        if dos_match:
-            dos = dos_match.group(1).strip()
-        else:
-            logger.warning("⚠️ DOS field not found in response")
-
-        # Extract DONTS
-        donts_match = re.search(r'DONTS:\s*(.+?)(?=KEY_RISKS:|$)', response_text, re.DOTALL)
-        if donts_match:
-            donts = donts_match.group(1).strip()
-        else:
-            logger.warning("⚠️ DONTS field not found in response")
-
-        # Extract KEY_RISKS
-        risks_match = re.search(r'KEY_RISKS:\s*(.+?)(?=TIMELINE:|$)', response_text, re.DOTALL)
-        if risks_match:
-            key_risks = risks_match.group(1).strip()
-        else:
-            logger.warning("⚠️ KEY_RISKS field not found in response")
-
-        # Extract TIMELINE
-        timeline_match = re.search(r'TIMELINE:\s*(.+?)(?=NEXT_STEP:|$)', response_text, re.DOTALL)
-        if timeline_match:
-            timeline = timeline_match.group(1).strip()
-        else:
-            logger.warning("⚠️ TIMELINE field not found in response")
-
-        # Extract NEXT_STEP
-        next_step_match = re.search(r'NEXT_STEP:\s*(.+?)(?=CHANGES_REQUIRED:|$)', response_text, re.DOTALL)
-        if next_step_match:
-            next_step = next_step_match.group(1).strip()
-        else:
-            logger.warning("⚠️ NEXT_STEP field not found in response")
-
-        # Extract CHANGES_REQUIRED
-        changes_match = re.search(r'CHANGES_REQUIRED:\s*(.+?)$', response_text, re.MULTILINE | re.DOTALL)
-        if changes_match:
-            changes_text = changes_match.group(1).strip()
-            if changes_text and changes_text.lower() != "n/a":
-                changes_required = changes_text
-            else:
-                changes_required = "N/A"
-        else:
-            logger.warning("⚠️ CHANGES_REQUIRED field not found in response")
-            changes_required = "N/A"
-
-        # Validate parsed data using Pydantic model
         try:
             validated = ProjectAnalysis(
-                score=score,
-                recommendation=recommendation,
-                market_opportunity=market_opportunity,
-                feasibility=feasibility,
-                resources_required=resources_required,
-                dos=dos,
-                donts=donts,
-                key_risks=key_risks,
-                timeline=timeline,
-                next_step=next_step,
-                changes_required=changes_required
+                idea_summary=idea_summary,
+                problem_statement=problem_statement,
+                target_audience=target_audience,
+                market_validation=market_validation,
+                competitor_analysis=competitor_analysis,
+                mvp_recommendation=mvp_recommendation,
+                risk_analysis=risk_analysis,
+                final_recommendation=final_recommendation
             )
             logger.info("✅ Output validation passed - all fields are correct")
             return {
-                "score": validated.score,
-                "recommendation": self._clean_text(validated.recommendation),
-                "market_opportunity": self._clean_text(validated.market_opportunity),
-                "feasibility": self._clean_text(validated.feasibility),
-                "resources_required": self._clean_text(validated.resources_required),
-                "dos": self._clean_text(validated.dos),
-                "donts": self._clean_text(validated.donts),
-                "key_risks": self._clean_text(validated.key_risks),
-                "timeline": self._clean_text(validated.timeline),
-                "next_step": self._clean_text(validated.next_step),
-                "changes_required": self._clean_text(validated.changes_required),
+                "idea_summary":        self._clean_text(validated.idea_summary),
+                "problem_statement":   self._clean_text(validated.problem_statement),
+                "target_audience":     self._clean_text(validated.target_audience),
+                "market_validation":   self._clean_text(validated.market_validation),
+                "competitor_analysis": self._clean_text(validated.competitor_analysis),
+                "mvp_recommendation":  self._clean_text(validated.mvp_recommendation),
+                "risk_analysis":       self._clean_text(validated.risk_analysis),
+                "final_recommendation": self._clean_text(validated.final_recommendation),
                 "raw_response": response_text
             }
         except ValidationError as e:
             logger.error(f"❌ Output validation failed: {e}")
             return {
-                "score": 0,
-                "recommendation": "Please try again",
-                "market_opportunity": "",
-                "feasibility": "",
-                "resources_required": "",
-                "dos": "",
-                "donts": "",
-                "key_risks": "",
-                "timeline": "",
-                "next_step": f"Validation error: {str(e)}",
-                "changes_required": "",
+                "idea_summary": "",
+                "problem_statement": "",
+                "target_audience": "",
+                "market_validation": "",
+                "competitor_analysis": "",
+                "mvp_recommendation": "",
+                "risk_analysis": "",
+                "final_recommendation": f"Validation error: {str(e)}",
                 "raw_response": response_text,
                 "validation_failed": True
             }
@@ -349,36 +286,28 @@ CHANGES_REQUIRED: [If you said 'Consider changes' above, list 3-5 specific tweak
         # Format the analysis into email body
         email_body = f"""PROJECT ANALYSIS RESULTS
 
-Score: {analysis_result['score']} out of 100
+IDEA SUMMARY:
+{analysis_result['idea_summary']}
 
-RECOMMENDATION: {analysis_result['recommendation']}
+PROBLEM STATEMENT:
+{analysis_result['problem_statement']}
 
-MARKET OPPORTUNITY:
-{analysis_result['market_opportunity']}
+TARGET AUDIENCE:
+{analysis_result['target_audience']}
 
-FEASIBILITY:
-{analysis_result['feasibility']}
+MARKET VALIDATION:
+{analysis_result['market_validation']}
 
-RESOURCES REQUIRED:
-{analysis_result['resources_required']}
+COMPETITOR ANALYSIS:
+{analysis_result['competitor_analysis']}
 
-DO's:
-{analysis_result['dos']}
+MVP RECOMMENDATION:
+{analysis_result['mvp_recommendation']}
 
-DON'Ts:
-{analysis_result['donts']}
+RISK ANALYSIS:
+{analysis_result['risk_analysis']}
 
-KEY RISKS:
-{analysis_result['key_risks']}
-
-TIMELINE:
-{analysis_result['timeline']}
-
-NEXT STEP:
-{analysis_result['next_step']}
-
-CHANGES REQUIRED:
-{analysis_result['changes_required']}"""
+FINAL RECOMMENDATION: {analysis_result['final_recommendation']}"""
 
         # Send email using the tool
         email_result = custom_tools.send_email_to_user(

@@ -25,5 +25,19 @@ TOOLS_SCHEMA = [
             },
             "required": ["email_address", "subject", "body"]
         }
+    },
+    {
+        "name": "tavily_search",
+        "description": "Search the web for real-time information about markets, competitors, trends, and statistics",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query (e.g., 'AI market size 2026', 'competitor analysis for SaaS', 'blockchain adoption trends')"
+                }
+            },
+            "required": ["query"]
+        }
     }
 ]
