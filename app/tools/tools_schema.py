@@ -39,5 +39,23 @@ TOOLS_SCHEMA = [
             },
             "required": ["query"]
         }
+    },
+    {
+        "name": "google_places_search",
+        "description": "Search for business locations in a specific zipcode using Google Places API",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "zipcode": {
+                    "type": "string",
+                    "description": "US zipcode to search for businesses (e.g., '10001', '94105')"
+                },
+                "business_type": {
+                    "type": "string",
+                    "description": "Type of business to search for (e.g., 'coffee shop', 'tech startup', 'restaurant', 'fitness center')"
+                }
+            },
+            "required": ["zipcode", "business_type"]
+        }
     }
 ]

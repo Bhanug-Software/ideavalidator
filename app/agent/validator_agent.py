@@ -1,7 +1,4 @@
 import re
-import json
-import os
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from app.utils.config import client, MODEL, MAX_TOKENS
 from app.utils.logger import logger
@@ -12,12 +9,6 @@ from pydantic import ValidationError
 from app.tools import custom_tools
 from app.tools.tools_schema import TOOLS_SCHEMA
 from langsmith import traceable
-from langsmith.client import Client as LangSmithClient
-
-os.environ.setdefault("LANGSMITH_TRACING", "true")
-
-# Initialize LangSmith client for manual tracing
-langsmith_client = LangSmithClient()
 
 class ValidatorAgent:
     #AI Agent that validates the project ideas
@@ -27,7 +18,6 @@ class ValidatorAgent:
         self.model = MODEL
         self.max_tokens = MAX_TOKENS
         self.tools = TOOLS_SCHEMA
-        self._tool_lock = threading.Lock()  # for thread-safe operations
 
     @traceable(name="execute_tool", tags=["tools", "execution"])
     def _execute_tool(self, tool_name, tool_input):
@@ -43,6 +33,11 @@ class ValidatorAgent:
         elif tool_name == "tavily_search":
             return custom_tools.tavily_search(
                 tool_input["query"]
+            )
+        elif tool_name == "google_places_search":
+            return custom_tools.google_places_search(
+                tool_input["zipcode"],
+                tool_input["business_type"]
             )
         else:
             return f"Unknown tool: {tool_name}"
@@ -79,10 +74,14 @@ class ValidatorAgent:
 
 Here's the idea: {project_idea}
 
-BEFORE writing your analysis, use tavily_search exactly 2 times:
-1. First search: find real competitors for this idea
-2. Second search: find current market size and demand for this idea
-Only use send_email_to_user if the user explicitly asks to send results to their email.
+CRITICAL: Follow this exact sequence BEFORE writing your analysis:
+1. FIRST: Check if user mentioned a zipcode or location. If yes, IMMEDIATELY use google_places_search with that zipcode and the business type.
+2. THEN: Use tavily_search exactly 2 times:
+   - First search: find real competitors for this idea
+   - Second search: find current market size and demand for this idea
+3. Only use send_email_to_user if the user explicitly asks to send results to their email.
+
+IMPORTANT: When you find results from google_places_search, you MUST include them in your COMPETITOR_ANALYSIS section with their exact names, ratings, and Google Maps links.
 
 Write in a casual, friendly tone - like advising a friend.
 - Use regular dashes (-), NOT em dashes (—)
@@ -99,13 +98,13 @@ TARGET_AUDIENCE: [Who exactly is this for? Age, role, situation - be specific]
 
 MARKET_VALIDATION: [Real market size, demand signals, growth trends based on your search]
 
-COMPETITOR_ANALYSIS: [List 3-5 real competitors found, how this idea is different]
+COMPETITOR_ANALYSIS: [List 3-5 real competitors found (including local ones from zipcode search), their ratings, and how this idea is different]
 
 MVP_RECOMMENDATION: [What is the simplest version to build first? What features are must-haves vs nice-to-haves?]
 
 RISK_ANALYSIS: [4-5 real risks with a short mitigation for each]
 
-FINAL_RECOMMENDATION: [Build it / Don't build it / Consider changes]"""
+FINAL_RECOMMENDATION: [MUST be exactly one of: "Build it" OR "Don't build it" OR "Consider changes" - pick the one that best fits your analysis]"""
 
         # Send message to Claude with tools
         logger.info("→ Sending prompt to Claude API with tools...")
@@ -115,28 +114,65 @@ FINAL_RECOMMENDATION: [Build it / Don't build it / Consider changes]"""
 
         # Agentic loop - continue until Claude is done
         while True:
-            message = client.messages.create(
+            # Check if this is the final call (no more tools needed)
+            is_final_call = len(messages) > 1 and messages[-1].get("role") == "user"
+
+            # Stream the final response, otherwise get full response for tool handling
+            response_stream = client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 tools=TOOLS_SCHEMA,
-                messages=messages
+                messages=messages,
+                stream=is_final_call  # Stream only if we expect final text response
             )
 
-            logger.info(f"← Received response from Claude")
+            # Collect response content
+            if is_final_call:
+                # Stream mode - collect text as it arrives
+                logger.info(f"→ Streaming analysis response...\n")
+                response_text = ""
+                total_input_tokens = 0
+                total_output_tokens = 0
 
-            # Track cost
-            call_cost = cost_tracker.add_usage(
-                message.usage.input_tokens,
-                message.usage.output_tokens
-            )
-            logger.info(f"💰 Cost for this call: {cost_tracker.format_cost(call_cost)}")
+                for event in response_stream:
+                    # Display text chunks in real-time
+                    if event.type == "content_block_delta" and hasattr(event.delta, "text"):
+                        print(event.delta.text, end="", flush=True)
+                        response_text += event.delta.text
 
-            # Check if Claude called a tool
-            tool_calls = [block for block in message.content if block.type == "tool_use"]
+                    # Collect token usage at the end
+                    if event.type == "message_delta" and hasattr(event, "usage"):
+                        total_input_tokens = event.usage.input_tokens
+                        total_output_tokens = event.usage.output_tokens
 
-            if not tool_calls:
-                # No tool calls, Claude is done - extract the text response
+                print()  # New line after streaming completes
+                logger.info(f"\n← Streaming complete")
+
+                # Track cost for streamed response
+                call_cost = cost_tracker.add_usage(total_input_tokens, total_output_tokens)
+                logger.info(f"💰 Cost for this call: {cost_tracker.format_cost(call_cost)}")
+
+                message = None  # No message object in stream mode
                 break
+
+            else:
+                # Non-streaming mode - get full response for tool processing
+                message = response_stream
+                logger.info(f"← Received response from Claude")
+
+                # Track cost
+                call_cost = cost_tracker.add_usage(
+                    message.usage.input_tokens,
+                    message.usage.output_tokens
+                )
+                logger.info(f"💰 Cost for this call: {cost_tracker.format_cost(call_cost)}")
+
+                # Check if Claude called a tool
+                tool_calls = [block for block in message.content if block.type == "tool_use"]
+
+                if not tool_calls:
+                    # No tool calls, Claude is done - extract the text response
+                    break
 
             # Claude called tools - execute them
             logger.info(f"Claude requested {len(tool_calls)} tool call(s)")
@@ -147,28 +183,47 @@ FINAL_RECOMMENDATION: [Build it / Don't build it / Consider changes]"""
             # Execute each tool in parallel and collect results
             def run_tool(tool_call):
                 logger.info(f"Executing: {tool_call.name}")
-                result = self._execute_tool(tool_call.name, tool_call.input)
-                logger.info(f"✅ Tool result received")
-                return {
-                    "type": "tool_result",
-                    "tool_use_id": tool_call.id,
-                    "content": result
-                }
+                try:
+                    result = self._execute_tool(tool_call.name, tool_call.input)
+                    logger.info(f"✅ Tool result received")
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": tool_call.id,
+                        "content": result
+                    }
+                except Exception as e:
+                    logger.error(f"❌ Tool {tool_call.name} failed: {str(e)}")
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": tool_call.id,
+                        "content": f"Error executing {tool_call.name}: {str(e)}"
+                    }
 
             tool_results = []
             with ThreadPoolExecutor() as executor:
                 futures = [executor.submit(run_tool, tool_call) for tool_call in tool_calls]
-                tool_results = [future.result() for future in futures]
+                # Collect results with error handling
+                for future in futures:
+                    try:
+                        result = future.result()
+                        tool_results.append(result)
+                    except Exception as e:
+                        logger.error(f"❌ Unexpected error in tool execution: {str(e)}")
+                        # Don't fail entire workflow if one tool has unexpected error
+                        continue
 
             # Send tool results back to Claude
             messages.append({"role": "user", "content": tool_results})
 
-        # Extract the final text response
-        response_text = next(
-            (block.text for block in message.content if hasattr(block, "text")),
-            ""
-        )
-        logger.info(f"← Received final analysis from Claude")
+        # Extract the final text response (if not already from streaming)
+        if message is not None:
+            response_text = next(
+                (block.text for block in message.content if hasattr(block, "text")),
+                ""
+            )
+        # else: response_text already collected from streaming above
+
+        logger.info(f"← Final analysis received")
 
         # Parse the response
         result = self._parse_response(response_text)
@@ -224,14 +279,19 @@ FINAL_RECOMMENDATION: [Build it / Don't build it / Consider changes]"""
         # Extract FINAL_RECOMMENDATION
         rec_match = re.search(r'FINAL_RECOMMENDATION:\s*(.+?)$', response_text, re.DOTALL)
         rec_text = rec_match.group(1).strip() if rec_match else ""
-        if "Build it" in rec_text:
-            final_recommendation = "Build it"
-        elif "Don't build it" in rec_text:
+
+        # Smart recommendation mapping - handle variations
+        rec_text_lower = rec_text.lower()
+        if "don't build" in rec_text_lower or "do not build" in rec_text_lower:
             final_recommendation = "Don't build it"
-        elif "Consider changes" in rec_text:
+        elif "consider changes" in rec_text_lower or "reconsider" in rec_text_lower:
             final_recommendation = "Consider changes"
+        elif "build" in rec_text_lower:
+            # Contains "build" - map to "Build it" (includes "cautiously build", "build it smart", etc.)
+            final_recommendation = "Build it"
         else:
-            final_recommendation = rec_text
+            # Default to "Consider changes" if we can't determine
+            final_recommendation = "Consider changes"
 
         try:
             validated = ProjectAnalysis(

@@ -1,6 +1,12 @@
+import re
 from app.agent.validator_agent import ValidatorAgent
 from app.utils.user_guidance import user_guidance
 from app.utils.cost_tracker import cost_tracker
+
+def validate_email(email):
+    """Validate email address format"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
 
 def main():
     """Interactive project idea validator"""
@@ -22,7 +28,7 @@ def main():
     print("\n" + "=" * 70)
     print(f"Checking: {project_idea}")
     print("=" * 70)
-    print("\nPlease wait, I am analyzing your idea...\n")
+    print("\n🔍 Analyzing your idea...\n")
 
     # Validate the idea
     result = agent.validate_idea(project_idea)
@@ -32,46 +38,12 @@ def main():
         print(f"\n\n{'='*70}")
         print(f"YOUR PROJECT ANALYSIS")
         print(f"{'='*70}\n")
-        print(f"Score: {result['score']} out of 100\n")
-        print(f"❌ {result['reasoning']}\n")
+        error_msg = result.get('reasoning', result.get('final_recommendation', 'Validation error'))
+        print(f"❌ {error_msg}\n")
         print(f"{'='*70}\n")
         return
 
-    # Print analysis results
-    print(f"\n\n{'='*70}")
-    print(f"YOUR PROJECT ANALYSIS")
-    print(f"{'='*70}\n")
-
-    print(f"\n💡 Idea Summary:")
-    print(f"{result['idea_summary']}\n")
-
-    print(f"{'='*70}")
-    print(f"\n🎯 Problem Statement:")
-    print(f"{result['problem_statement']}\n")
-
-    print(f"{'='*70}")
-    print(f"\n👥 Target Audience:")
-    print(f"{result['target_audience']}\n")
-
-    print(f"{'='*70}")
-    print(f"\n📊 Market Validation:")
-    print(f"{result['market_validation']}\n")
-
-    print(f"{'='*70}")
-    print(f"\n🔍 Competitor Analysis:")
-    print(f"{result['competitor_analysis']}\n")
-
-    print(f"{'='*70}")
-    print(f"\n🚀 MVP Recommendation:")
-    print(f"{result['mvp_recommendation']}\n")
-
-    print(f"{'='*70}")
-    print(f"\n⚠️  Risk Analysis:")
-    print(f"{result['risk_analysis']}\n")
-
-    print(f"{'='*70}")
-    print(f"\n✅ Final Recommendation: {result['final_recommendation']}")
-
+    # Analysis already streamed above, just add separator
     print(f"\n{'='*70}\n")
 
     # Ask if user wants to send analysis to email
@@ -80,7 +52,7 @@ def main():
     if send_email == "yes" or send_email == "y":
         email_address = input("Enter your email address: ").strip()
 
-        if "@" in email_address:
+        if validate_email(email_address):
             print("\nSending analysis to your email...\n")
 
             # Call the email tool through the agent
@@ -88,7 +60,7 @@ def main():
 
             print(email_result)
         else:
-            print("\n❌ Invalid email address. Please try again.\n")
+            print("\n❌ Invalid email address format. Please use: user@example.com\n")
 
     # Show cost summary
     cost_tracker.print_summary()

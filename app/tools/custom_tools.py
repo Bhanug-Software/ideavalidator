@@ -8,8 +8,11 @@ import base64
 import os
 import pickle
 import re
+import time
 from datetime import datetime
 from email.mime.text import MIMEText
+from urllib.parse import quote_plus
+from functools import wraps
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -17,9 +20,29 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from tavily import TavilyClient
 from dotenv import load_dotenv
+import googlemaps
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+def retry_with_backoff(max_retries=3, initial_delay=1):
+    """Decorator for retrying failed API calls with exponential backoff"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+            return None
+        return wrapper
+    return decorator
 
 
 # Gmail API scopes
@@ -205,6 +228,7 @@ Message ID: {result.get('id')}"""
         return f"❌ Error sending email: {str(error)}"
 
 
+@retry_with_backoff(max_retries=3, initial_delay=1)
 def tavily_search(query):
     """
     Search the web using Tavily API for real-time information
@@ -227,10 +251,10 @@ def tavily_search(query):
         if not api_key:
             return "❌ Error: TAVILY_API_KEY not found in .env file"
 
-        # Initialize Tavily client
+        # Initialize Tavily client with 30 second timeout
         client = TavilyClient(api_key=api_key)
 
-        # Search the web
+        # Search the web (with implicit timeout from client)
         response = client.search(
             query=query,
             max_results=5,  # Return top 5 results
@@ -245,7 +269,7 @@ def tavily_search(query):
 
             Sources:
             """
-            
+
             for i, result in enumerate(response.get("results", []), 1):
                 search_results += f"\n{i}. {result['title']}\n   URL: {result['url']}\n   {result['content'][:150]}...\n"
 
@@ -256,3 +280,77 @@ def tavily_search(query):
 
     except Exception as error:
         return f"❌ Error searching web: {str(error)}"
+
+
+@retry_with_backoff(max_retries=3, initial_delay=1)
+def google_places_search(zipcode, business_type):
+    """
+    Search for business locations in a specific zipcode using Google Places API
+
+    Parameters:
+    -----------
+    zipcode : str
+        US zipcode to search for businesses (e.g., '10001')
+    business_type : str
+        Type of business to search for (e.g., 'coffee shop', 'restaurant')
+
+    Returns:
+    --------
+    str
+        Formatted list of businesses found with details
+    """
+
+    try:
+        # Get API key from environment variable
+        api_key = os.getenv("GOOGLE_PLACES_API_KEY")
+
+        if not api_key:
+            return "❌ Error: GOOGLE_PLACES_API_KEY not found in .env file"
+
+        # Initialize Google Maps client with 30 second timeout
+        gmaps = googlemaps.Client(key=api_key, timeout=30)
+
+        # Get coordinates from zipcode using geocoding
+        try:
+            geocode_result = gmaps.geocode(address=zipcode)
+            if not geocode_result:
+                return f"❌ Error: Could not find coordinates for zipcode {zipcode}"
+
+            location = geocode_result[0]['geometry']['location']
+            lat, lng = location['lat'], location['lng']
+        except Exception as e:
+            return f"❌ Error geocoding zipcode: {str(e)}"
+
+        # Search for places near the zipcode center
+        places_result = gmaps.places_nearby(
+            location=(lat, lng),
+            radius=5000,  # 5km radius search
+            keyword=business_type,
+            type='establishment'
+        )
+
+        if not places_result.get('results'):
+            return f"❌ No {business_type} businesses found in zipcode {zipcode}"
+
+        # Format results
+        search_results = f"Businesses matching '{business_type}' in zipcode {zipcode}:\n\n"
+
+        for i, place in enumerate(places_result.get('results', [])[:10], 1):  # Top 10 results
+            name = place.get('name', 'N/A')
+            address = place.get('vicinity', 'Address not available')
+            rating = place.get('rating', 'No rating')
+            open_status = "Open" if place.get('opening_hours', {}).get('open_now') else "Closed"
+
+            # Create Google Maps link using place name and address with proper URL encoding
+            maps_link = f"https://www.google.com/maps/search/{quote_plus(name)}+{quote_plus(address)}"
+
+            search_results += f"{i}. {name}\n"
+            search_results += f"   📍 Address: {address}\n"
+            search_results += f"   ⭐ Rating: {rating}/5.0\n"
+            search_results += f"   🔗 Google Maps: {maps_link}\n"
+            search_results += f"   Status: {open_status}\n\n"
+
+        return search_results
+
+    except Exception as error:
+        return f"❌ Error searching Google Places: {str(error)}"

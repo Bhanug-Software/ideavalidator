@@ -1,9 +1,7 @@
 from loguru import logger
-from app.utils.config import client
+from app.utils.config import client, MODEL
 import os
 from langsmith import traceable
-
-os.environ.setdefault("LANGSMITH_TRACING", "true")
 
 class InputValidator:
     """Validate user input before sending to Claude"""
@@ -75,7 +73,7 @@ Answer only YES or NO:"""
 
         try:
             message = client.messages.create(
-                model="claude-sonnet-4-6",
+                model=MODEL,
                 max_tokens=10,
                 messages=[{"role": "user", "content": prompt}]
             )
