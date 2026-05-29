@@ -1,7 +1,6 @@
 import re
 from app.agent.validator_agent import ValidatorAgent
 from app.utils.user_guidance import user_guidance
-from app.utils.cost_tracker import cost_tracker
 
 def validate_email(email):
     """Validate email address format"""
@@ -62,9 +61,6 @@ def main():
         else:
             print("\n❌ Invalid email address format. Please use: user@example.com\n")
 
-    # Show cost summary
-    cost_tracker.print_summary()
-    
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,6 @@ from app.utils.config import client, MODEL, MAX_TOKENS
 from app.utils.logger import logger
 from app.utils.input_validator import input_validator
 from app.utils.output_validator import ProjectAnalysis
-from app.utils.cost_tracker import cost_tracker
 from pydantic import ValidationError
 from app.tools import custom_tools
 from app.tools.tools_schema import TOOLS_SCHEMA
@@ -148,10 +147,6 @@ FINAL_RECOMMENDATION: [MUST be exactly one of: "Build it" OR "Don't build it" OR
                 print()  # New line after streaming completes
                 logger.info(f"\n← Streaming complete")
 
-                # Track cost for streamed response
-                call_cost = cost_tracker.add_usage(total_input_tokens, total_output_tokens)
-                logger.info(f"💰 Cost for this call: {cost_tracker.format_cost(call_cost)}")
-
                 message = None  # No message object in stream mode
                 break
 
@@ -159,13 +154,6 @@ FINAL_RECOMMENDATION: [MUST be exactly one of: "Build it" OR "Don't build it" OR
                 # Non-streaming mode - get full response for tool processing
                 message = response_stream
                 logger.info(f"← Received response from Claude")
-
-                # Track cost
-                call_cost = cost_tracker.add_usage(
-                    message.usage.input_tokens,
-                    message.usage.output_tokens
-                )
-                logger.info(f"💰 Cost for this call: {cost_tracker.format_cost(call_cost)}")
 
                 # Check if Claude called a tool
                 tool_calls = [block for block in message.content if block.type == "tool_use"]
