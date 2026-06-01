@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from app.tools import custom_tools
 from app.tools.tools_schema import TOOLS_SCHEMA
 from langsmith import traceable
+from langgraph.graph import START
 
 
 # Define the workflow state
@@ -36,7 +37,7 @@ class ValidatorAgent:
 
     def _build_workflow(self):
         """Build the LangGraph workflow"""
-        from langgraph.graph import START
+        
         graph = StateGraph(AnalysisState)
 
         # Add workflow nodes (steps)
@@ -64,37 +65,40 @@ class ValidatorAgent:
     @traceable(name="validate_input_node", tags=["validation", "node"])
     def _node_validate_input(self, state: AnalysisState) -> AnalysisState:
         """Node 1: Validate user input"""
-        logger.info(f"✓ Validation started for: {state['project_idea']}")
+        logger.info(f"→ Validating input...")
+        logger.debug(f"  Project idea length: {len(state['project_idea'])} chars")
 
-        is_valid, validation_message = input_validator.validate_complete(state["project_idea"])
+        try:
+            is_valid, validation_message = input_validator.validate_complete(state["project_idea"])
+            logger.debug(f"  Validation result: {is_valid}")
 
-        if not is_valid:
-            logger.error(f"❌ Input validation failed: {validation_message}")
-            return {
-                **state,
-                "validation_error": True,
-                "error_message": validation_message,
-                "final_result": {
-                    "score": 0,
-                    "reasoning": validation_message,
-                    "recommendation": "Please provide a valid project idea",
-                    "raw_response": validation_message,
-                    "validation_failed": True
+            if not is_valid:
+                logger.warning(f"⚠️  Input validation failed: {validation_message}")
+                return {
+                    **state,
+                    "validation_error": True,
+                    "error_message": validation_message,
+                    "final_result": {
+                        "score": 0,
+                        "reasoning": validation_message,
+                        "recommendation": "Please provide a valid project idea",
+                        "raw_response": validation_message,
+                        "validation_failed": True
+                    }
                 }
-            }
 
-        logger.info("✅ Input validated successfully, sending to Claude...")
+            logger.info("✅ Input validated successfully, preparing prompt...")
 
-        prompt = f"""You are an expert startup advisor validating a project idea.
+            prompt = f"""You are an expert startup advisor validating a project idea.
 
 Here's the idea: {state['project_idea']}
 
 CRITICAL: Follow this exact sequence BEFORE writing your analysis:
 1. FIRST: Check if user mentioned a zipcode or location. If yes, IMMEDIATELY use google_places_search with that zipcode and the business type.
-2. THEN: Use tavily_search exactly 3 times:
-   - First search: find real competitors for this idea
-   - Second search: find current market size and demand for this idea
-   - Third Search: find the similar business not the competitors.
+2. THEN: Use tavily_search exactly 2 times:
+- First search: find real competitors for this idea
+- Second search: find current market size and demand for this idea
+
 3. Only use send_email_to_user if the user explicitly asks to send results to their email.
 
 IMPORTANT: When you find results from google_places_search, you MUST include them in your COMPETITOR_ANALYSIS section with their exact names, ratings, and Google Maps links.
@@ -122,44 +126,158 @@ RISK_ANALYSIS: [4-5 real risks with a short mitigation for each]
 
 FINAL_RECOMMENDATION: [MUST be exactly one of: "Build it" OR "Don't build it" OR "Consider changes" - pick the one that best fits your analysis]"""
 
-        logger.info("→ Sending prompt to Claude API with tools...")
-        messages = [{"role": "user", "content": prompt}]
+            logger.info("→ Sending prompt to Claude API with tools...")
+            messages = [{"role": "user", "content": prompt}]
 
-        return {**state, "messages": messages, "validation_error": False}
+            return {**state, "messages": messages, "validation_error": False}
+
+        except Exception as e:
+            logger.error(f"❌ Input validation node failed: {str(e)}", exc_info=True)
+            return {
+                **state,
+                "validation_error": True,
+                "error_message": f"Validation error: {str(e)}",
+                "final_result": {
+                    "score": 0,
+                    "reasoning": f"Validation Error: {str(e)}",
+                    "recommendation": "Please try again",
+                    "validation_failed": True
+                }
+            }
 
     @traceable(name="call_claude_node", tags=["claude", "node"])
     def _node_call_claude(self, state: AnalysisState) -> AnalysisState:
         """Node 2: Call Claude API"""
         logger.info(f"← Calling Claude API")
+        logger.debug(f"  Messages: {len(state['messages'])}, Model: {self.model}")
 
-        # Check if this is the final call (no more tools needed)
-        is_final_call = len(state["messages"]) > 1 and state["messages"][-1].get("role") == "user"
+        try:
+            # Check if this is the final call (no more tools needed)
+            is_final_call = len(state["messages"]) > 1 and state["messages"][-1].get("role") == "user"
 
-        response_stream = client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            tools=TOOLS_SCHEMA,
-            messages=state["messages"],
-            stream=is_final_call
-        )
+            logger.debug(f"  Is final call: {is_final_call}")
+            response_stream = client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                tools=TOOLS_SCHEMA,
+                messages=state["messages"],
+                stream=is_final_call
+            )
 
-        if is_final_call:
-            # Stream mode - collect text as it arrives
-            logger.info(f"→ Streaming analysis response...\n")
-            response_text = ""
+            if is_final_call:
+                # Stream mode - collect text as it arrives with error handling
+                logger.info(f"→ Streaming analysis response...\n")
+                response_text = ""
+                stream_interrupted = False
 
-            for event in response_stream:
-                if event.type == "content_block_delta" and hasattr(event.delta, "text"):
-                    print(event.delta.text, end="", flush=True)
-                    response_text += event.delta.text
+                try:
+                    for event in response_stream:
+                        try:
+                            if event.type == "content_block_delta" and hasattr(event.delta, "text"):
+                                chunk = event.delta.text
+                                if chunk:  # Only add non-empty chunks
+                                    print(chunk, end="", flush=True)
+                                    response_text += chunk
+                            elif event.type == "message_stop":
+                                logger.debug(f"  Stream message_stop received")
+                                break
+                            elif event.type == "content_block_stop":
+                                logger.debug(f"  Stream content_block_stop received")
+                                continue
+                        except AttributeError as e:
+                            logger.warning(f"⚠️  Unexpected event structure: {str(e)}")
+                            continue
+                        except Exception as e:
+                            logger.warning(f"⚠️  Error processing stream event: {str(e)}")
+                            continue
 
-            print()  # New line after streaming
-            logger.info(f"\n← Streaming complete")
-            return {**state, "response": None, "response_text": response_text}
-        else:
-            # Non-streaming mode
-            logger.info(f"← Received response from Claude")
-            return {**state, "response": response_stream}
+                except StopIteration:
+                    logger.warning(f"⚠️  Stream ended prematurely (StopIteration)")
+                    stream_interrupted = True
+
+                except Exception as stream_error:
+                    logger.error(f"❌ Stream interrupted: {str(stream_error)}", exc_info=True)
+                    stream_interrupted = True
+
+                    # If we got some response before interruption, use it
+                    if response_text:
+                        logger.warning(f"⚠️  Using partial response ({len(response_text)} chars collected before interruption)")
+                        print("\n[Stream interrupted - using partial response]\n")
+                        return {**state, "response": None, "response_text": response_text}
+                    else:
+                        # No data collected at all
+                        error_msg = f"Stream failed before any data collected: {str(stream_error)}"
+                        logger.error(f"❌ {error_msg}")
+                        return {
+                            **state,
+                            "validation_error": True,
+                            "error_message": error_msg,
+                            "final_result": {
+                                "score": 0,
+                                "reasoning": "Stream connection lost",
+                                "recommendation": "Please try again",
+                                "validation_failed": True
+                            }
+                        }
+
+                print()  # New line after streaming
+
+                if stream_interrupted and response_text:
+                    logger.warning(f"⚠️  Streaming completed with interruption ({len(response_text)} chars collected)")
+                else:
+                    logger.info(f"← Streaming complete ({len(response_text)} chars)")
+
+                # Validate we got meaningful response
+                if not response_text or len(response_text.strip()) == 0:
+                    logger.error(f"❌ Stream produced empty response")
+                    return {
+                        **state,
+                        "validation_error": True,
+                        "error_message": "Received empty response from Claude",
+                        "final_result": {
+                            "score": 0,
+                            "reasoning": "Empty response received",
+                            "recommendation": "Please try again",
+                            "validation_failed": True
+                        }
+                    }
+
+                return {**state, "response": None, "response_text": response_text}
+            else:
+                # Non-streaming mode
+                logger.info(f"← Received response from Claude")
+                logger.debug(f"  Response blocks: {len(response_stream.content)}")
+                return {**state, "response": response_stream}
+
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e)
+
+            # Log specific error types
+            if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+                logger.error(f"❌ Claude API timeout: {error_msg}", exc_info=True)
+                recommendation = "Request timed out. Please try again."
+            elif "rate_limit" in error_type.lower() or "overloaded" in error_msg.lower():
+                logger.error(f"❌ Claude API rate limited: {error_msg}", exc_info=True)
+                recommendation = "API rate limited. Please wait and try again."
+            elif "authentication" in error_type.lower() or "unauthorized" in error_msg.lower():
+                logger.error(f"❌ Claude API authentication failed: {error_msg}", exc_info=True)
+                recommendation = "Authentication failed. Check API key."
+            else:
+                logger.error(f"❌ Claude API call failed ({error_type}): {error_msg}", exc_info=True)
+                recommendation = "Please try again later"
+
+            return {
+                **state,
+                "validation_error": True,
+                "error_message": f"Claude API error: {error_msg}",
+                "final_result": {
+                    "score": 0,
+                    "reasoning": f"API Error ({error_type}): {error_msg}",
+                    "recommendation": recommendation,
+                    "validation_failed": True
+                }
+            }
 
     def _should_execute_tools(self, state: AnalysisState) -> str:
         """Conditional logic: Should we execute tools or parse response?"""
@@ -184,77 +302,251 @@ FINAL_RECOMMENDATION: [MUST be exactly one of: "Build it" OR "Don't build it" OR
     @traceable(name="execute_tools_node", tags=["tools", "node"])
     def _node_execute_tools(self, state: AnalysisState) -> AnalysisState:
         """Node 3: Execute tools called by Claude"""
-        tool_calls = [block for block in state["response"].content if block.type == "tool_use"]
-        logger.info(f"Claude requested {len(tool_calls)} tool call(s)")
+        logger.info(f"→ Executing tools...")
+        logger.debug(f"  State keys: {state.keys()}")
 
-        # Add Claude's response to messages
-        messages = state["messages"] + [{"role": "assistant", "content": state["response"].content}]
+        try:
+            tool_calls = [block for block in state["response"].content if block.type == "tool_use"]
+            logger.info(f"Claude requested {len(tool_calls)} tool call(s)")
 
-        # Execute tools
-        def run_tool(tool_call):
-            logger.info(f"Executing: {tool_call.name}")
-            try:
-                result = self._execute_tool(tool_call.name, tool_call.input)
-                logger.info(f"✅ Tool result received")
-                return {
-                    "type": "tool_result",
-                    "tool_use_id": tool_call.id,
-                    "content": result
-                }
-            except Exception as e:
-                logger.error(f"❌ Tool {tool_call.name} failed: {str(e)}")
-                return {
-                    "type": "tool_result",
-                    "tool_use_id": tool_call.id,
-                    "content": f"Error executing {tool_call.name}: {str(e)}"
-                }
+            for i, tool in enumerate(tool_calls, 1):
+                logger.debug(f"  {i}. {tool.name} (ID: {tool.id})")
 
-        tool_results = []
-        with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(run_tool, tool_call) for tool_call in tool_calls]
-            for future in futures:
+            # Add Claude's response to messages
+            messages = state["messages"] + [{"role": "assistant", "content": state["response"].content}]
+
+            # Execute tools
+            def run_tool(tool_call):
+                logger.info(f"⚙️  Executing: {tool_call.name}")
                 try:
-                    result = future.result()
-                    tool_results.append(result)
+                    result = self._execute_tool(tool_call.name, tool_call.input)
+                    logger.info(f"✅ {tool_call.name} completed")
+                    logger.debug(f"  Result length: {len(str(result))} chars")
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": tool_call.id,
+                        "content": result
+                    }
                 except Exception as e:
-                    logger.error(f"❌ Unexpected error in tool execution: {str(e)}")
-                    continue
+                    logger.error(f"❌ Tool {tool_call.name} failed: {str(e)}", exc_info=True)
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": tool_call.id,
+                        "content": f"Error executing {tool_call.name}: {str(e)}"
+                    }
 
-        # Send tool results back to Claude
-        messages.append({"role": "user", "content": tool_results})
+            tool_results = []
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(run_tool, tool_call) for tool_call in tool_calls]
+                for future in futures:
+                    try:
+                        result = future.result()
+                        tool_results.append(result)
+                    except Exception as e:
+                        logger.error(f"❌ Unexpected error in tool execution: {str(e)}", exc_info=True)
+                        continue
 
-        return {**state, "messages": messages, "response": None}
+            logger.info(f"✅ All tools executed ({len(tool_results)} results)")
+
+            # Send tool results back to Claude
+            messages.append({"role": "user", "content": tool_results})
+
+            return {**state, "messages": messages, "response": None}
+
+        except Exception as e:
+            logger.error(f"❌ Tool execution node failed: {str(e)}", exc_info=True)
+            return {
+                **state,
+                "validation_error": True,
+                "error_message": f"Tool execution error: {str(e)}",
+                "final_result": {
+                    "score": 0,
+                    "reasoning": f"Tool Error: {str(e)}",
+                    "recommendation": "Please try again",
+                    "validation_failed": True
+                }
+            }
 
     @traceable(name="parse_response_node", tags=["parsing", "node"])
     def _node_parse_response(self, state: AnalysisState) -> AnalysisState:
         """Node 4: Parse and validate Claude's response"""
-        logger.info(f"← Final analysis received")
+        logger.info(f"→ Parsing response...")
+        logger.debug(f"  Response text length: {len(state['response_text'])} chars")
 
-        result = self._parse_response(state["response_text"])
-        logger.info("✓ Analysis complete")
+        try:
+            result = self._parse_response(state["response_text"])
+            logger.info("✅ Analysis parsed successfully")
+            logger.debug(f"  Fields extracted: {list(result.keys())}")
 
-        return {**state, "final_result": result}
+            if result.get("validation_failed"):
+                logger.warning("⚠️ Output validation failed during parsing")
+            
+
+            history = state.get("conversation_history",[])
+            history.append(
+                {
+                "role": "assistant",
+                "content": state["response_text"]
+                }
+            )
+
+            
+            return {
+                **state, 
+                "conversation_history": history,
+                "final_result": result
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Parse response node failed: {str(e)}", exc_info=True)
+            return {
+                **state,
+                "validation_error": True,
+                "error_message": f"Parsing error: {str(e)}",
+                "final_result": {
+                    "score": 0,
+                    "reasoning": f"Parsing Error: {str(e)}",
+                    "recommendation": "Please try again",
+                    "validation_failed": True
+                }
+            }
+
+    def _validate_tool_input(self, tool_name: str, tool_input: dict) -> tuple[bool, str]:
+        """Validate tool input before execution
+
+        Args:
+            tool_name: Name of the tool
+            tool_input: Input parameters dictionary
+
+        Returns:
+            (is_valid, error_message)
+        """
+        # Check input is a dictionary
+        if not isinstance(tool_input, dict):
+            return False, f"Tool input must be a dictionary, got {type(tool_input).__name__}"
+
+        # Tool-specific validation
+        if tool_name == "send_email_to_user":
+            required = {"email_address", "subject", "body"}
+            missing = required - set(tool_input.keys())
+            if missing:
+                return False, f"Missing required fields: {', '.join(missing)}"
+
+            # Validate types
+            if not isinstance(tool_input["email_address"], str):
+                return False, "email_address must be a string"
+            if not isinstance(tool_input["subject"], str):
+                return False, "subject must be a string"
+            if not isinstance(tool_input["body"], str):
+                return False, "body must be a string"
+
+            # Validate email format (basic check)
+            email = tool_input["email_address"].strip()
+            if "@" not in email or "." not in email:
+                return False, f"Invalid email format: {email}"
+
+            # Validate non-empty
+            if not email or not tool_input["subject"] or not tool_input["body"]:
+                return False, "email_address, subject, and body cannot be empty"
+
+            return True, ""
+
+        elif tool_name == "tavily_search":
+            if "query" not in tool_input:
+                return False, "Missing required field: query"
+
+            if not isinstance(tool_input["query"], str):
+                return False, "query must be a string"
+
+            query = tool_input["query"].strip()
+            if not query:
+                return False, "query cannot be empty"
+
+            if len(query) > 1000:
+                return False, f"query too long (max 1000 chars, got {len(query)})"
+
+            return True, ""
+
+        elif tool_name == "google_places_search":
+            required = {"zipcode", "business_type"}
+            missing = required - set(tool_input.keys())
+            if missing:
+                return False, f"Missing required fields: {', '.join(missing)}"
+
+            if not isinstance(tool_input["zipcode"], str):
+                return False, "zipcode must be a string"
+            if not isinstance(tool_input["business_type"], str):
+                return False, "business_type must be a string"
+
+            zipcode = tool_input["zipcode"].strip()
+            business_type = tool_input["business_type"].strip()
+
+            if not zipcode or not business_type:
+                return False, "zipcode and business_type cannot be empty"
+
+            # Validate zipcode format (US zip codes are 5-9 digits)
+            if not zipcode.replace("-", "").isdigit() or len(zipcode.replace("-", "")) < 5:
+                return False, f"Invalid zipcode format: {zipcode}"
+
+            if len(business_type) > 200:
+                return False, f"business_type too long (max 200 chars)"
+
+            return True, ""
+
+        else:
+            return False, f"Unknown tool: {tool_name}"
 
     @traceable(name="execute_tool", tags=["tools", "execution"])
     def _execute_tool(self, tool_name, tool_input):
-        """Execute a tool and return the result"""
+        """Execute a tool and return the result with input validation"""
         logger.info(f"🔧 Executing tool: {tool_name}")
+        logger.debug(f"  Tool input: {tool_input}")
 
-        if tool_name == "send_email_to_user":
-            return custom_tools.send_email_to_user(
-                tool_input["email_address"],
-                tool_input["subject"],
-                tool_input["body"]
-            )
-        elif tool_name == "tavily_search":
-            return custom_tools.tavily_search(tool_input["query"])
-        elif tool_name == "google_places_search":
-            return custom_tools.google_places_search(
-                tool_input["zipcode"],
-                tool_input["business_type"]
-            )
-        else:
-            return f"Unknown tool: {tool_name}"
+        try:
+            # Validate input BEFORE execution
+            is_valid, error_message = self._validate_tool_input(tool_name, tool_input)
+            if not is_valid:
+                logger.error(f"❌ Invalid input for {tool_name}: {error_message}")
+                return f"Validation Error: {error_message}"
+
+            logger.debug(f"  Input validation passed")
+
+            if tool_name == "send_email_to_user":
+                logger.debug(f"  Sending email to {tool_input['email_address']}")
+                result = custom_tools.send_email_to_user(
+                    tool_input["email_address"],
+                    tool_input["subject"],
+                    tool_input["body"]
+                )
+                logger.info(f"✅ Email sent successfully")
+                return result
+
+            elif tool_name == "tavily_search":
+                logger.debug(f"  Searching for: {tool_input['query']}")
+                result = custom_tools.tavily_search(tool_input["query"])
+                logger.info(f"✅ Search completed")
+                return result
+
+            elif tool_name == "google_places_search":
+                logger.debug(f"  Searching places in {tool_input['zipcode']} for {tool_input['business_type']}")
+                result = custom_tools.google_places_search(
+                    tool_input["zipcode"],
+                    tool_input["business_type"]
+                )
+                logger.info(f"✅ Places search completed")
+                return result
+
+        except KeyError as e:
+            logger.error(f"❌ Missing parameter for {tool_name}: {str(e)}", exc_info=True)
+            return f"Error: Missing parameter {str(e)} for tool {tool_name}"
+
+        except ValueError as e:
+            logger.error(f"❌ Invalid value for {tool_name}: {str(e)}", exc_info=True)
+            return f"Error: Invalid value - {str(e)}"
+
+        except Exception as e:
+            logger.error(f"❌ Tool {tool_name} execution failed: {str(e)}", exc_info=True)
+            return f"Error executing {tool_name}: {str(e)}"
 
     def _clean_text(self, text: str) -> str:
         """Remove markdown and formatting artifacts from Claude's response"""
