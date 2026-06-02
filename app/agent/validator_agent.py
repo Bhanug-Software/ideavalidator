@@ -13,6 +13,7 @@ from langsmith import traceable
 from langgraph.graph import START
 
 
+
 # Define the workflow state
 class AnalysisState(TypedDict):
     """State that flows through the LangGraph workflow"""
@@ -23,6 +24,7 @@ class AnalysisState(TypedDict):
     validation_error: bool
     error_message: str
     final_result: dict
+    conversation_history: list
 
 
 class ValidatorAgent:
@@ -657,7 +659,8 @@ FINAL_RECOMMENDATION: [MUST be exactly one of: "Build it" OR "Don't build it" OR
             "response_text": "",
             "validation_error": False,
             "error_message": "",
-            "final_result": {}
+            "final_result": {},
+            "conversation_history": []
         }
 
         result = self.workflow.invoke(initial_state)
@@ -666,6 +669,117 @@ FINAL_RECOMMENDATION: [MUST be exactly one of: "Build it" OR "Don't build it" OR
             return result["final_result"]
 
         return result["final_result"]
+
+    def ask_follow_up(self, question: str, previous_messages: list, conversation_history: list) -> dict:
+        """Ask a follow-up question about the analysis
+
+        Args:
+            question: The follow-up question from the user
+            previous_messages: Previous messages from the workflow
+            conversation_history: Previous conversation history
+
+        Returns:
+            dict with updated analysis
+        """
+        logger.info(f"✓ Follow-up question: {question}")
+
+        # Add user's follow-up question to messages
+        messages = previous_messages + [{"role": "user", "content": question}]
+
+        try:
+            # Keep looping until Claude gives final text answer (not tool calls)
+            while True:
+                logger.info(f"← Calling Claude for follow-up...")
+
+                response = client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    tools=TOOLS_SCHEMA,
+                    messages=messages
+                )
+
+                # Check if Claude called tools
+                tool_calls = [block for block in response.content if block.type == "tool_use"]
+
+                if not tool_calls:
+                    # No tools called - extract and stream the text response
+                    response_text = next(
+                        (block.text for block in response.content if hasattr(block, "text")),
+                        ""
+                    )
+
+                    if not response_text:
+                        return {
+                            "validation_failed": True,
+                            "reasoning": "Received empty response. Please try again."
+                        }
+
+                    logger.info(f"→ Streaming follow-up response...\n")
+                    print(response_text)
+                    print()  # New line after response
+                    logger.info(f"← Follow-up response complete ({len(response_text)} chars)")
+
+                    # Update conversation history
+                    updated_history = conversation_history + [
+                        {"role": "user", "content": question},
+                        {"role": "assistant", "content": response_text}
+                    ]
+
+                    logger.info("✅ Follow-up processed successfully")
+                    return {
+                        "follow_up_response": response_text,
+                        "conversation_history": updated_history,
+                        "messages": messages + [{"role": "assistant", "content": response_text}]
+                    }
+
+                else:
+                    # Tools were called - execute them and continue loop
+                    logger.info(f"Claude requested {len(tool_calls)} tool call(s) for follow-up")
+
+                    # Add Claude's response to messages
+                    messages.append({"role": "assistant", "content": response.content})
+
+                    # Execute tools
+                    def run_tool(tool_call):
+                        logger.info(f"⚙️  Executing: {tool_call.name}")
+                        try:
+                            result = self._execute_tool(tool_call.name, tool_call.input)
+                            logger.info(f"✅ {tool_call.name} completed")
+                            return {
+                                "type": "tool_result",
+                                "tool_use_id": tool_call.id,
+                                "content": result
+                            }
+                        except Exception as e:
+                            logger.error(f"❌ Tool {tool_call.name} failed: {str(e)}")
+                            return {
+                                "type": "tool_result",
+                                "tool_use_id": tool_call.id,
+                                "content": f"Error: {str(e)}"
+                            }
+
+                    tool_results = []
+                    with ThreadPoolExecutor() as executor:
+                        futures = [executor.submit(run_tool, tool_call) for tool_call in tool_calls]
+                        for future in futures:
+                            try:
+                                result = future.result()
+                                tool_results.append(result)
+                            except Exception as e:
+                                logger.error(f"❌ Unexpected error in tool execution: {str(e)}")
+                                continue
+
+                    logger.info(f"✅ All tools executed ({len(tool_results)} results)")
+
+                    # Send tool results back to Claude and loop again
+                    messages.append({"role": "user", "content": tool_results})
+
+        except Exception as e:
+            logger.error(f"❌ Follow-up question failed: {str(e)}", exc_info=True)
+            return {
+                "validation_failed": True,
+                "reasoning": f"Follow-up failed: {str(e)}"
+            }
 
     def send_analysis_via_email(self, email_address: str, analysis_result: dict) -> str:
         """Send project analysis results via email
