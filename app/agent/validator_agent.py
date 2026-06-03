@@ -691,22 +691,49 @@ FINAL_RECOMMENDATION: [MUST be exactly one of: "Build it" OR "Don't build it" OR
             while True:
                 logger.info(f"← Calling Claude for follow-up...")
 
+                # First call without streaming to check for tool calls
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
                     tools=TOOLS_SCHEMA,
-                    messages=messages
+                    messages=messages,
+                    stream=False
                 )
 
                 # Check if Claude called tools
                 tool_calls = [block for block in response.content if block.type == "tool_use"]
 
                 if not tool_calls:
-                    # No tools called - extract and stream the text response
-                    response_text = next(
-                        (block.text for block in response.content if hasattr(block, "text")),
-                        ""
+                    # No tools called - stream the text response
+                    logger.info(f"→ Streaming follow-up response...\n")
+                    response_text = ""
+
+                    # Create a streaming request for the response
+                    stream_response = client.messages.create(
+                        model=self.model,
+                        max_tokens=self.max_tokens,
+                        tools=TOOLS_SCHEMA,
+                        messages=messages,
+                        stream=True
                     )
+
+                    try:
+                        for event in stream_response:
+                            try:
+                                if event.type == "content_block_delta" and hasattr(event.delta, "text"):
+                                    chunk = event.delta.text
+                                    if chunk:
+                                        print(chunk, end="", flush=True)
+                                        response_text += chunk
+                            except:
+                                continue
+                    except Exception as e:
+                        logger.warning(f"⚠️  Stream interrupted: {str(e)}")
+                        if not response_text:
+                            return {
+                                "validation_failed": True,
+                                "reasoning": "Stream failed. Please try again."
+                            }
 
                     if not response_text:
                         return {
@@ -714,8 +741,6 @@ FINAL_RECOMMENDATION: [MUST be exactly one of: "Build it" OR "Don't build it" OR
                             "reasoning": "Received empty response. Please try again."
                         }
 
-                    logger.info(f"→ Streaming follow-up response...\n")
-                    print(response_text)
                     print()  # New line after response
                     logger.info(f"← Follow-up response complete ({len(response_text)} chars)")
 

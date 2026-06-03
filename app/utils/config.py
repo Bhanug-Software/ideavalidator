@@ -16,6 +16,6 @@ GMAIL_OAUTH_CREDENTIALS = os.getenv("GMAIL_OAUTH_CREDENTIALS", "app/credentials/
 if not ANTHROPIC_API_KEY:
     raise ValueError("❌ Error: ANTHROPIC_API_KEY not found in .env file")
 
-client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=30.0)
+client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0)
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 4096
